@@ -414,8 +414,4 @@ class Config:
 
 
 # Initialize global configuration (for backward compatibility)
-<<<<<<< HEAD
 config = Config()
-=======
-config = Config()
->>>>>>> 570c991005b0ff9e859b21570521046c17a61fb8
