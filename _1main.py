@@ -225,9 +225,25 @@ def run_prediction_mode(config):
     
     if use_saved == "Yes":
         try:
-            all_models, artifacts = load_saved_models_and_preprocessors(config)
+            # Load models with enhanced error handling
+            all_models, artifacts, load_status = load_saved_models_and_preprocessors(config)
             global_preprocessor, clustering_config, clustering_2d_config, cluster_models, cluster_predictors = artifacts
-            st.success("Models and preprocessors loaded successfully!")
+            
+            # Display load status
+            display_model_load_status(load_status)
+            
+            # Check if critical components loaded successfully
+            if not all_models:
+                st.error("❌ No models loaded. Cannot proceed with predictions.")
+                st.info("Please ensure you have trained models in the 'Trained' directory.")
+                return
+            
+            st.success(f"✅ Successfully loaded {len(all_models)} model(s)")
+            
+            # Warning if predictors failed to load but continue anyway
+            if not cluster_predictors and clustering_config:
+                st.warning("⚠️ Cluster predictors failed to load. Predictions may be limited.")
+                st.info("You can still make predictions, but cluster assignment may not work correctly.")
             
             st.subheader("2. Upload New Data")
             create_info_button("upload_prediction_data")
@@ -242,19 +258,43 @@ def run_prediction_mode(config):
                 
                 if st.button("Make Predictions"):
                     with st.spinner("Generating predictions..."):
-                        predictions = predict_for_new_data(
-                            all_models, 
-                            new_data, 
-                            cluster_predictors,
-                            clustering_config, 
-                            clustering_2d_config
-                        )
-                        
-                        display_predictions(predictions, config)
+                        try:
+                            predictions = predict_for_new_data(
+                                all_models, 
+                                new_data, 
+                                cluster_predictors,
+                                clustering_config, 
+                                clustering_2d_config
+                            )
+                            
+                            display_predictions(predictions, config)
+                        except Exception as e:
+                            st.error(f"❌ Prediction failed: {str(e)}")
+                            st.error(f"Error type: {type(e).__name__}")
+                            
+                            # Provide helpful debugging info
+                            with st.expander("🔍 Debug Information"):
+                                st.write("**Models loaded:**", list(all_models.keys())[:10])
+                                st.write("**Cluster predictors:**", list(cluster_predictors.keys()) if cluster_predictors else "None")
+                                st.write("**New data columns:**", list(new_data.columns))
+                                st.write("**Full error:**")
+                                st.exception(e)
         
         except Exception as e:
-            st.error(f"Error loading models: {str(e)}")
+            st.error(f"❌ Error loading models: {str(e)}")
+            st.error(f"Error type: {type(e).__name__}")
             st.info("Please ensure you have trained models in the 'Trained' directory.")
+            
+            # Show which files are present
+            if os.path.exists(config.MODELS_DIRECTORY):
+                files = os.listdir(config.MODELS_DIRECTORY)
+                if files:
+                    st.write("Files found in Trained directory:")
+                    st.write(files)
+                else:
+                    st.warning("Trained directory is empty. Please train models first.")
+            else:
+                st.warning("Trained directory does not exist. Please train models first.")
     
     else:
         st.info("Model upload functionality - Upload your trained models manually")
@@ -445,16 +485,125 @@ def execute_training(data, config):
             plot_prediction_distribution(y_true, y_pred, title=f"{model_name} - {cluster_name}")
             plot_error_distribution(y_true, y_pred, title=f"{model_name} - {cluster_name}")
 
+
 def load_saved_models_and_preprocessors(config):
-    """Load all saved artifacts including cluster predictors."""
-    all_models = load_saved_models(config.MODELS_DIRECTORY)
-    global_preprocessor = load_global_preprocessor(config.MODELS_DIRECTORY)
-    clustering_config = joblib.load(os.path.join(config.MODELS_DIRECTORY, "clustering_config.joblib"))
-    clustering_2d_config = joblib.load(os.path.join(config.MODELS_DIRECTORY, "clustering_2d_config.joblib"))
-    cluster_models = load_clustering_models(config.MODELS_DIRECTORY)
-    cluster_predictors = load_clustering_predictors(config.MODELS_DIRECTORY)
+    """
+    Load all saved artifacts including cluster predictors with enhanced error handling.
     
-    return all_models, (global_preprocessor, clustering_config, clustering_2d_config, cluster_models, cluster_predictors)
+    UPDATED: Now returns load status for better user feedback.
+    
+    Returns:
+        tuple: (all_models, artifacts, load_status)
+            - all_models: Dictionary of trained models
+            - artifacts: Tuple of (global_preprocessor, clustering_config, clustering_2d_config, 
+                                   cluster_models, cluster_predictors)
+            - load_status: Dictionary with loading success/failure for each component
+    """
+    load_status = {
+        'models': False,
+        'global_preprocessor': False,
+        'clustering_config': False,
+        'clustering_2d_config': False,
+        'cluster_models': False,
+        'cluster_predictors': False
+    }
+    
+    # Load models
+    try:
+        all_models = load_saved_models(config.MODELS_DIRECTORY)
+        load_status['models'] = len(all_models) > 0
+    except Exception as e:
+        st.error(f"Failed to load models: {str(e)}")
+        all_models = {}
+    
+    # Load global preprocessor
+    try:
+        global_preprocessor = load_global_preprocessor(config.MODELS_DIRECTORY)
+        load_status['global_preprocessor'] = global_preprocessor is not None
+    except Exception as e:
+        st.warning(f"Failed to load global preprocessor: {str(e)}")
+        global_preprocessor = None
+    
+    # Load clustering config
+    try:
+        clustering_config_path = os.path.join(config.MODELS_DIRECTORY, "clustering_config.joblib")
+        if os.path.exists(clustering_config_path):
+            clustering_config = joblib.load(clustering_config_path)
+            load_status['clustering_config'] = True
+        else:
+            clustering_config = {}
+    except Exception as e:
+        st.warning(f"Failed to load clustering config: {str(e)}")
+        clustering_config = {}
+    
+    # Load 2D clustering config
+    try:
+        clustering_2d_config_path = os.path.join(config.MODELS_DIRECTORY, "clustering_2d_config.joblib")
+        if os.path.exists(clustering_2d_config_path):
+            clustering_2d_config = joblib.load(clustering_2d_config_path)
+            load_status['clustering_2d_config'] = True
+        else:
+            clustering_2d_config = {}
+    except Exception as e:
+        st.warning(f"Failed to load 2D clustering config: {str(e)}")
+        clustering_2d_config = {}
+    
+    # Load cluster models
+    try:
+        cluster_models = load_clustering_models(config.MODELS_DIRECTORY)
+        load_status['cluster_models'] = len(cluster_models) > 0
+    except Exception as e:
+        st.warning(f"Failed to load cluster models: {str(e)}")
+        cluster_models = {}
+    
+    # Load cluster predictors (CRITICAL - with enhanced error handling)
+    try:
+        cluster_predictors = load_clustering_predictors(config.MODELS_DIRECTORY)
+        load_status['cluster_predictors'] = len(cluster_predictors) > 0 if cluster_predictors else False
+        
+        # If predictors didn't load but clustering config exists, show detailed warning
+        if not load_status['cluster_predictors'] and (clustering_config or clustering_2d_config):
+            st.warning("⚠️ Clustering is configured but predictors failed to load.")
+            st.info("This may happen if models were trained with an older version. Predictions will be limited.")
+            
+    except Exception as e:
+        st.error(f"❌ Failed to load cluster predictors: {str(e)}")
+        st.info("Continuing without cluster predictors. Predictions may be limited.")
+        cluster_predictors = {}
+        load_status['cluster_predictors'] = False
+    
+    artifacts = (global_preprocessor, clustering_config, clustering_2d_config, cluster_models, cluster_predictors)
+    
+    return all_models, artifacts, load_status
+
+
+def display_model_load_status(load_status):
+    """Display a summary of what was successfully loaded."""
+    st.subheader("📦 Model Loading Status")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Core Components:**")
+        st.write(f"{'✅' if load_status['models'] else '❌'} Trained Models")
+        st.write(f"{'✅' if load_status['global_preprocessor'] else '⚠️'} Global Preprocessor")
+    
+    with col2:
+        st.write("**Clustering Components:**")
+        st.write(f"{'✅' if load_status['clustering_config'] else '⚠️'} Clustering Config")
+        st.write(f"{'✅' if load_status['clustering_2d_config'] else '⚠️'} 2D Clustering Config")
+        st.write(f"{'✅' if load_status['cluster_models'] else '⚠️'} Cluster Models")
+        st.write(f"{'✅' if load_status['cluster_predictors'] else '⚠️'} Cluster Predictors")
+    
+    # Overall status
+    critical_components = ['models']
+    all_critical_loaded = all(load_status[comp] for comp in critical_components)
+    
+    if all_critical_loaded:
+        st.success("✅ All critical components loaded successfully")
+    else:
+        st.error("❌ Some critical components failed to load")
+
 
 def upload_prediction_data():
     uploaded_file = st.file_uploader("Upload new data for prediction", type=["csv"])

@@ -190,17 +190,17 @@ def predict_for_new_data(models, new_data, cluster_predictors, clustering_config
     """
     Make predictions for new data using trained models and cluster predictors.
     
-    CRITICAL FIX #8: Uses cluster_predictors instead of calling fit_predict on DBSCAN
+    UPDATED: Now works with class-based predictors from Solution 1
     
     Args:
-    - models: Dictionary of trained models
-    - new_data: New data to make predictions on
-    - cluster_predictors: Dictionary of cluster predictor functions
-    - clustering_config: 1D clustering configuration
-    - clustering_2d_config: 2D clustering configuration
+        models: Dictionary of trained models
+        new_data: New data to make predictions on
+        cluster_predictors: Dictionary of cluster predictor objects (class instances)
+        clustering_config: 1D clustering configuration
+        clustering_2d_config: 2D clustering configuration
     
     Returns:
-    - DataFrame with predictions
+        DataFrame with predictions
     """
     st.subheader("Predictions for New Data")
     create_tooltip(TOOLTIPS.get("new_data_predictions", "Making predictions on new data"))
@@ -210,38 +210,46 @@ def predict_for_new_data(models, new_data, cluster_predictors, clustering_config
     progress_bar = st.progress(0)
     for idx, (index, row) in enumerate(new_data.iterrows()):
         # Use cluster predictors instead of cluster models
-        clusters = predict_cluster_with_predictors(
-            row, 
-            cluster_predictors, 
-            clustering_config, 
-            clustering_2d_config
-        )
-        
-        # Combine all cluster labels to form a unique identifier
-        cluster_key = "_".join([f"{col}_{label}" for col, label in clusters.items()])
-        
-        if cluster_key in models:
-            model = models[cluster_key]
-            try:
-                prediction = make_predictions(model, row.to_frame().T)
+        try:
+            clusters = predict_cluster_with_predictors(
+                row, 
+                cluster_predictors, 
+                clustering_config, 
+                clustering_2d_config
+            )
+            
+            # Combine all cluster labels to form a unique identifier
+            cluster_key = "_".join([f"{col}_{label}" for col, label in clusters.items()])
+            
+            if cluster_key in models:
+                model = models[cluster_key]
+                try:
+                    prediction = make_predictions(model, row.to_frame().T)
+                    predictions.append({
+                        "Index": index,
+                        "Clusters": str(clusters),
+                        "Prediction": prediction[0]
+                    })
+                except Exception as e:
+                    st.warning(f"Prediction failed for index {index}: {str(e)}")
+                    predictions.append({
+                        "Index": index,
+                        "Clusters": str(clusters),
+                        "Prediction": f"Error: {str(e)}"
+                    })
+            else:
+                st.warning(f"No model found for cluster configuration: {cluster_key}")
                 predictions.append({
                     "Index": index,
                     "Clusters": str(clusters),
-                    "Prediction": prediction[0]
+                    "Prediction": "No model available"
                 })
-            except Exception as e:
-                st.warning(f"Prediction failed for index {index}: {str(e)}")
-                predictions.append({
-                    "Index": index,
-                    "Clusters": str(clusters),
-                    "Prediction": f"Error: {str(e)}"
-                })
-        else:
-            st.warning(f"No model found for cluster configuration: {cluster_key}")
+        except Exception as e:
+            st.error(f"Cluster prediction failed for index {index}: {str(e)}")
             predictions.append({
                 "Index": index,
-                "Clusters": str(clusters),
-                "Prediction": "No model available"
+                "Clusters": "Error in clustering",
+                "Prediction": f"Error: {str(e)}"
             })
         
         progress_bar.progress((idx + 1) / len(new_data))
@@ -252,86 +260,115 @@ def predict_for_new_data(models, new_data, cluster_predictors, clustering_config
     
     return predictions_df
 
+
 def predict_cluster_with_predictors(data_point, cluster_predictors, clustering_config, clustering_2d_config):
     """
-    Predict cluster assignments using cluster predictor functions.
+    Predict cluster assignments using cluster predictor objects.
     
-    CRITICAL FIX #8: This replaces the broken predict_cluster function that called
-    fit_predict on DBSCAN models (which doesn't work for single points).
+    UPDATED: Now works with class-based predictors (NearestCentroidPredictor, 
+    KNNClusterPredictor, ModelBasedPredictor) from Solution 1.
     
     Args:
-    - data_point: Single data point (Series)
-    - cluster_predictors: Dictionary of predictor functions
-    - clustering_config: 1D clustering configuration
-    - clustering_2d_config: 2D clustering configuration
+        data_point: Single data point (Series)
+        cluster_predictors: Dictionary of predictor objects (class instances)
+        clustering_config: 1D clustering configuration
+        clustering_2d_config: 2D clustering configuration
     
     Returns:
-    - Dictionary of cluster assignments
+        Dictionary of cluster assignments
     """
     clusters = {}
     
-    # 1D Clustering prediction
+    # ========================================================================
+    # 1D Clustering Prediction
+    # ========================================================================
     for column, config_dict in clustering_config.items():
         method = config_dict['method']
+        
         if method == 'None':
             clusters[column] = 'label_0'
+            
         elif column in cluster_predictors and cluster_predictors[column] is not None:
             predictor = cluster_predictors[column]
             
             # Prepare data for prediction
             if column in data_point.index:
+                # Create 2D array for predictor (shape: [1, 1])
                 data = np.array([[data_point[column]]])
                 
-                # Apply same scaling as training
-                scaler = StandardScaler()
-                # Note: Ideally we'd save the scaler from training, but for simplicity
-                # we'll use the predictor directly which should handle scaling internally
                 try:
+                    # Call predictor (works with both predictor(data) and predictor.predict(data))
+                    # Because we implemented __call__ method in all predictor classes
                     cluster_label = predictor(data)[0]
                     clusters[column] = f'label_{cluster_label}'
+                    
                 except Exception as e:
                     st.warning(f"Cluster prediction failed for {column}: {str(e)}")
+                    debug_print(f"Predictor type: {type(predictor)}, Data shape: {data.shape}")
                     clusters[column] = 'label_0'  # Default to first cluster
             else:
+                st.warning(f"Column '{column}' not found in data point")
                 clusters[column] = 'unknown'
         else:
+            # No predictor available
             clusters[column] = 'label_0'  # Default if no predictor
     
-    # 2D Clustering prediction
+    # ========================================================================
+    # 2D Clustering Prediction
+    # ========================================================================
     for column_pair, config_dict in clustering_2d_config.items():
         method = config_dict['method']
+        
         if method == 'None':
             clusters[column_pair] = 'label_0'
+            
         elif column_pair in cluster_predictors and cluster_predictors[column_pair] is not None:
             predictor = cluster_predictors[column_pair]
             
             # Prepare data for prediction
             if all(col in data_point.index for col in column_pair):
+                # Create 2D array for predictor (shape: [1, 2])
                 data = np.array([[data_point[column_pair[0]], data_point[column_pair[1]]]])
                 
                 try:
+                    # Call predictor (works with both predictor(data) and predictor.predict(data))
                     cluster_label = predictor(data)[0]
                     clusters[column_pair] = f'label_{cluster_label}'
+                    
                 except Exception as e:
                     st.warning(f"Cluster prediction failed for {column_pair}: {str(e)}")
+                    debug_print(f"Predictor type: {type(predictor)}, Data shape: {data.shape}")
                     clusters[column_pair] = 'label_0'
             else:
+                missing_cols = [col for col in column_pair if col not in data_point.index]
+                st.warning(f"Columns {missing_cols} not found in data point")
                 clusters[column_pair] = 'unknown'
         else:
+            # No predictor available
             clusters[column_pair] = 'label_0'
     
     return clusters
 
-# Legacy function kept for backward compatibility but should not be used
+
+# ============================================================================
+# Legacy function - DEPRECATED (kept for backward compatibility)
+# ============================================================================
+
 def predict_cluster(data_point, cluster_models, clustering_config, clustering_2d_config):
     """
     DEPRECATED: This function has a critical bug with DBSCAN.
     Use predict_cluster_with_predictors instead.
     
-    This function is kept only for backward compatibility.
+    This function is kept only for backward compatibility and should NOT be used.
+    It will be removed in a future version.
     """
-    st.warning("⚠️ Using deprecated predict_cluster function. This may fail with DBSCAN. Use predict_cluster_with_predictors instead.")
+    st.error("⚠️ DEPRECATED FUNCTION CALLED: predict_cluster()")
+    st.error("This function has known issues with DBSCAN clustering.")
+    st.error("Please use predict_cluster_with_predictors() instead.")
+    st.stop()
     
+    # Original buggy code commented out to prevent accidental use
+    """
     clusters = {}
     
     # 1D Clustering prediction
@@ -369,6 +406,8 @@ def predict_cluster(data_point, cluster_models, clustering_config, clustering_2d
             clusters[column_pair] = 'unknown'
     
     return clusters
+    """
+
 
 def evaluate_predictions(y_true, y_pred):
     """Evaluate predictions and display comprehensive metrics."""
@@ -378,6 +417,7 @@ def evaluate_predictions(y_true, y_pred):
     plot_residuals(y_true, y_pred)
     plot_prediction_distribution(y_true, y_pred)
     plot_error_distribution(y_true, y_pred)
+
 
 def load_saved_models(models_directory):
     """Load all saved models from the specified directory."""
